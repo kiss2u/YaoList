@@ -1,0 +1,14 @@
+services:
+  yaolist:
+    image: ghcr.io/kiss2u/yaolist:latest
+    container_name: yaolist
+    restart: unless-stopped
+    # Alpine 镜像支持 host 模式，也可以用 bridge
+    network_mode: host
+    volumes:
+      # 映射数据目录（根据你的程序实际需求）
+      - ./data:/app/data
+      # 映射配置文件
+      - ./config.yaml:/app/config.yaml
+    environment:
+      - TZ=Asia/Shanghai
