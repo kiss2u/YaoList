@@ -3,61 +3,63 @@
 # ------------------------------
 FROM node:18-alpine AS frontend-builder
 WORKDIR /web_build
-# 复制 package 文件
 COPY web/package*.json ./
-# 安装依赖
 RUN npm install
-# 复制源码并构建
 COPY web/ .
 RUN npm run build
 
 # ------------------------------
-# 阶段 2: 构建后端 (Rust + Alpine)
+# 阶段 2: 基础环境 (Base) - 安装 cargo-chef
 # ------------------------------
-# 使用 rust:alpine 镜像，自动处理 musl 编译
-FROM rust:alpine AS backend-builder
+FROM rust:alpine AS chef
+# 安装 musl 编译环境 (Alpine 编译 Rust 必须)
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev
+# 安装 cargo-chef 工具
+RUN cargo install cargo-chef
 WORKDIR /app
 
-# 安装 musl 编译所需的 C 库和 OpenSSL 开发包
-# alpine 下编译通常需要 musl-dev, pkgconfig, openssl-dev
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev
+# ------------------------------
+# 阶段 3: 规划 (Planner)
+# ------------------------------
+FROM chef AS planner
+COPY . .
+# 这一步只分析 Cargo.toml/lock，生成 recipe.json (配方文件)
+RUN cargo chef prepare --recipe-path recipe.json
 
-# 复制 Cargo.toml (去掉 Cargo.lock 因为之前报错说没有)
-COPY Cargo.toml ./
+# ------------------------------
+# 阶段 4: 烹饪与构建 (Builder)
+# ------------------------------
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
 
-# 预编译依赖层
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release
-RUN rm -rf src
+# 【核心步骤】利用配方文件构建依赖缓存
+# cargo-chef 会自动识别这里需要 lib.rs 还是 main.rs 并自动创建
+RUN cargo chef cook --release --recipe-path recipe.json
 
-# 复制源码
+# 依赖编译完了，现在复制真正的源代码
 COPY . .
 
 # 编译正式二进制文件
-# 注意：在 rust:alpine 中，target 默认就是 x86_64-unknown-linux-musl
 RUN cargo build --release
 
 # ------------------------------
-# 阶段 3: 最终运行时镜像 (Alpine)
+# 阶段 5: 运行时镜像 (Runtime)
 # ------------------------------
 FROM alpine:latest
 
 # 安装运行时必要依赖
-# ca-certificates: 用于 HTTPS 请求
-# tzdata: 用于设置时区
-# libgcc: 某些 Rust 二进制需要
 RUN apk add --no-cache ca-certificates tzdata libgcc
 
 WORKDIR /app
 
-# 从构建阶段复制二进制文件
-# 注意：路径和名字需要根据 Cargo.toml 确认，这里假设是 yaolist
-COPY --from=backend-builder /app/target/release/yaolist /app/yaolist
-COPY --from=backend-builder /app/config.yaml /app/config.yaml
+# 复制编译产物
+# ⚠️ 注意：请再次确认 Cargo.toml 中的 name。这里假设是 yaolist-backend 或 yaolist
+# 如果不确定名字，建议先用 COPY --from=builder /app/target/release/ /app/temp/ 进去看一眼
+# 或者这里直接复制整个 release 目录下的文件（比较暴力但有效）
+COPY --from=builder /app/target/release/yaolist /app/yaolist
+COPY --from=builder /app/config.yaml /app/config.yaml
 
-# 暴露端口
 EXPOSE 8080
 
-# 赋予执行权限并启动
 RUN chmod +x /app/yaolist
 CMD ["./yaolist"]
